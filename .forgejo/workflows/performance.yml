@@ -13,7 +13,7 @@ on:
 
 jobs:
   performance:
-    uses: http://lenovo.local:3000/justdoGIT/ci-templates/.forgejo/workflows/reusable-performance.yml@d6783383d1d566ff6ea0b803a869bb5766e81c78
+    uses: http://lenovo.local:3000/justdoGIT/ci-templates/.forgejo/workflows/reusable-performance.yml@a7a1af9db4207b36b60a394faae6df9f0c81607c
     with:
-      templates_ref: d6783383d1d566ff6ea0b803a869bb5766e81c78
+      templates_ref: a7a1af9db4207b36b60a394faae6df9f0c81607c
       seed_baseline: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_baseline }}
