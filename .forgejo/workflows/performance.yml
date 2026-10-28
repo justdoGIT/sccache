@@ -1,4 +1,4 @@
-name: Performance
+name: Performance measurements
 
 on:
   push:
@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       seed_baseline:
-        description: Seed the performance baseline
-        type: boolean
+        description: Create Cargo baselines on this runner for review.
         required: false
+        type: boolean
         default: false
 
 jobs:
