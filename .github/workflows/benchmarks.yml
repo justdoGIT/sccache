@@ -43,6 +43,7 @@ jobs:
         run: cargo codspeed build
 
       - name: Run benchmarks
+        if: ${{ github.repository == 'mozilla/sccache' }}
         uses: CodSpeedHQ/action@v5
         env:
           CODSPEED_LOG: debug
