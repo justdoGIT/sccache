@@ -3683,8 +3683,8 @@ LLVM version: 6.0",
         assert!(fs::metadata(&obj).is_err());
     }
 
-    // A compile that fails on the build server has to reach the client with its exit code; it used
-    // to arrive as "killed by signal 1".
+    // A compile that fails on the build server falls back locally in this fork and still reaches
+    // the client with exit code 1 rather than "killed by signal 1".
     #[test]
     #[cfg(feature = "dist-client")]
     fn test_compiler_get_cached_or_compile_dist_failed_compile() {
@@ -3725,6 +3725,16 @@ LLVM version: 6.0",
             Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
         );
         const COMPILER_STDERR: &[u8] = b"foo.c:1: error: expected ';'";
+        // Worker non-zero exits trigger local fallback (see fix(dist): fall back to local on
+        // worker failure), so queue the local fallback compiler command as well.
+        next_command(
+            &creator,
+            Ok(MockChild::new(
+                crate::util::exit_status_from_code(1),
+                b"",
+                COMPILER_STDERR,
+            )),
+        );
         let dist_client = test_dist::OneshotClient::new(1, vec![], COMPILER_STDERR.to_owned());
         let service = server::SccacheService::mock_with_dist_client(
             dist_client.clone(),
@@ -3754,7 +3764,7 @@ LLVM version: 6.0",
             })
             .unwrap();
         match cached {
-            CompileResult::CompileFailed(DistType::Ok(_), _) => {}
+            CompileResult::CompileFailed(DistType::Error, _) => {}
             _ => panic!("Unexpected compile result: {:?}", cached),
         }
         assert_eq!(res.status.code(), Some(1));

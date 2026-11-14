@@ -202,8 +202,8 @@ fn test_dist_failed_compile() {
     );
 
     get_stats(|info| {
-        assert_eq!(1, info.stats.dist_compiles.values().sum::<usize>());
-        assert_eq!(0, info.stats.dist_errors);
+        assert_eq!(0, info.stats.dist_compiles.values().sum::<usize>());
+        assert_eq!(1, info.stats.dist_errors);
         assert_eq!(1, info.stats.compile_fails);
     });
 }
