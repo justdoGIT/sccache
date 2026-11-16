@@ -45,7 +45,7 @@ async-trait = "0.1"
 backon = { version = "1", default-features = false, features = [
   "std-blocking-sleep",
 ] }
-base64 = "0.21"
+base64 = "0.23"
 bincode = "1"
 blake3 = "1"
 byteorder = "1.5"
@@ -150,6 +150,7 @@ filetime = "0.2"
 object = { version = "0.40", features = ["write"] }
 predicates = "=3.1.0"
 serial_test = "3.1"
+socket2 = "0.6"
 temp-env = "0.3.6"
 test-case = "3.3.1"
 thirtyfour = { version = "0.38.1", default-features = false, features = [
