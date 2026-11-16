@@ -19,7 +19,7 @@ use crate::compiler::{
     SingleCompileCommand, clang, gcc, write_temp_file,
 };
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{OsStrExt, encode_path, run_input_output};
+use crate::util::{OsStrExt, encode_path, env_var_name_matches, run_input_output};
 use crate::{counted_array, dist};
 use async_trait::async_trait;
 use fs::File;
@@ -103,6 +103,21 @@ impl CCompilerImpl for Msvc {
             self.is_clang,
         )
         .await
+    }
+
+    fn cached_stdout(
+        &self,
+        parsed_args: &ParsedArguments,
+        stdout: Vec<u8>,
+        preprocessor_stderr: &[u8],
+    ) -> Vec<u8> {
+        if !parsed_args.msvc_show_includes {
+            return stdout;
+        }
+        // Include paths are not part of the cache key, so the entry may come
+        // from a compile in another directory. Report the includes that this
+        // compile's own preprocessor run found instead of the stored ones.
+        replace_show_includes(&stdout, preprocessor_stderr, &self.includes_prefix)
     }
 
     fn generate_compile_commands<T>(
@@ -262,6 +277,33 @@ where
     );
 
     bail!("Failed to detect showIncludes prefix")
+}
+
+fn replace_show_includes(
+    stdout: &[u8],
+    preprocessor_stderr: &[u8],
+    includes_prefix: &str,
+) -> Vec<u8> {
+    let is_include =
+        |line: &[u8]| from_local_codepage(line).is_ok_and(|line| line.starts_with(includes_prefix));
+
+    let current_includes = preprocessor_stderr
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| is_include(line));
+
+    let mut lines = stdout.split_inclusive(|&b| b == b'\n').collect::<Vec<_>>();
+    // cl.exe echoes the source file name before the includes, both when
+    // compiling and when preprocessing. clang-cl does not.
+    let position = lines
+        .iter()
+        .position(|line| is_include(line))
+        .unwrap_or_else(|| {
+            let first_stderr_line = preprocessor_stderr.split_inclusive(|&b| b == b'\n').next();
+            usize::from(!lines.is_empty() && lines.first() == first_stderr_line.as_ref())
+        });
+    lines.retain(|line| !is_include(line));
+    lines.splice(position..position, current_includes);
+    lines.concat()
 }
 
 ArgData! {
@@ -576,17 +618,6 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
 
 // TODO: what to do with precompiled header flags? eg: /Yc, /YI, /Yu
 
-fn cl_env_var_matches(key: &OsStr, name: &str) -> bool {
-    #[cfg(windows)]
-    {
-        key.eq_ignore_ascii_case(name)
-    }
-    #[cfg(not(windows))]
-    {
-        key == name
-    }
-}
-
 /// Options from `CL` are prepended and options from `_CL_` are appended.
 /// The first `#` in each token stands for `=`.
 fn cl_env_args(
@@ -595,7 +626,7 @@ fn cl_env_args(
 ) -> std::result::Result<Vec<OsString>, &'static str> {
     let Some((_, value)) = env_vars
         .iter()
-        .find(|(key, _)| cl_env_var_matches(key, name))
+        .find(|(key, _)| env_var_name_matches(key, name))
     else {
         return Ok(Vec::new());
     };
@@ -614,7 +645,7 @@ fn cl_env_args(
 }
 
 fn is_cl_env_var(key: &OsStr) -> bool {
-    cl_env_var_matches(key, "CL") || cl_env_var_matches(key, "_CL_")
+    env_var_name_matches(key, "CL") || env_var_name_matches(key, "_CL_")
 }
 
 /// `cl` applies `CL` and `_CL_` itself, so drop them after they have been
@@ -1663,6 +1694,27 @@ mod test {
             detect_showincludes_prefix(&creator, "cl.exe".as_ref(), false, Vec::new(), &pool)
                 .wait()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_replace_show_includes() {
+        let stdout = b"foo.c\r\nNote: including file: C:\\a\\inc\\h.h\r\nwarning text\r\n";
+        let preprocessor_stderr = b"foo.c\r\nNote: including file: C:\\b\\inc\\h.h\r\n";
+        let includes_prefix = "Note: including file: ";
+        assert_eq!(
+            replace_show_includes(stdout, preprocessor_stderr, includes_prefix),
+            b"foo.c\r\nNote: including file: C:\\b\\inc\\h.h\r\nwarning text\r\n".to_vec()
+        );
+        let stdout = b"foo.c\r\nwarning text\r\n";
+        assert_eq!(
+            replace_show_includes(stdout, preprocessor_stderr, includes_prefix),
+            b"foo.c\r\nNote: including file: C:\\b\\inc\\h.h\r\nwarning text\r\n".to_vec()
+        );
+        let preprocessor_stderr = b"Note: including file: .\\h.h\n";
+        assert_eq!(
+            replace_show_includes(b"", preprocessor_stderr, includes_prefix),
+            preprocessor_stderr.to_vec()
         );
     }
 
