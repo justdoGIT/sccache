@@ -444,7 +444,7 @@ async fn get_source_files_and_env_deps<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     pool: &tokio::runtime::Handle,
-) -> Result<(Vec<PathBuf>, Vec<(OsString, OsString)>, String)>
+) -> Result<(Vec<PathBuf>, Vec<(OsString, Option<OsString>)>, String)>
 where
     T: CommandCreatorSync,
 {
@@ -505,7 +505,7 @@ struct RememberedDepInfo {
     inputs: DepInfoInputs,
     source_files: Vec<PathBuf>,
     source_hashes: Vec<String>,
-    env_deps: Vec<(OsString, OsString)>,
+    env_deps: Vec<(OsString, Option<OsString>)>,
     dep_info: String,
     outputs: Vec<String>,
 }
@@ -581,7 +581,12 @@ fn remembered_dep_info(key: &str) -> Option<RememberedDepInfo> {
         .cloned()
 }
 
-type SourcesAndEnvDeps = (Vec<PathBuf>, Vec<String>, Vec<(OsString, OsString)>, String);
+type SourcesAndEnvDeps = (
+    Vec<PathBuf>,
+    Vec<String>,
+    Vec<(OsString, Option<OsString>)>,
+    String,
+);
 
 fn remember_dep_info(
     key: String,
@@ -618,7 +623,7 @@ fn remember_dep_info(
 fn parse_dep_file<T, U>(
     file: T,
     cwd: U,
-) -> Result<(Vec<PathBuf>, Vec<(OsString, OsString)>, String)>
+) -> Result<(Vec<PathBuf>, Vec<(OsString, Option<OsString>)>, String)>
 where
     T: AsRef<Path>,
     U: AsRef<Path>,
@@ -680,16 +685,21 @@ where
     deps
 }
 
-fn parse_env_dep_info(dep_info: &str) -> Vec<(OsString, OsString)> {
+/// The value is `None` for a variable that was unset, which rustc writes as `NAME`
+/// rather than `NAME=` for one set to the empty string.
+fn parse_env_dep_info(dep_info: &str) -> Vec<(OsString, Option<OsString>)> {
     let mut env_deps = Vec::new();
     for line in dep_info.lines() {
         if let Some(env_dep) = line.strip_prefix("# env-dep:") {
             let mut split = env_dep.splitn(2, '=');
             match (split.next(), split.next()) {
                 (Some(var), Some(val)) => {
-                    env_deps.push((unescape_dep_env(var).into(), unescape_dep_env(val).into()));
+                    env_deps.push((
+                        unescape_dep_env(var).into(),
+                        Some(unescape_dep_env(val).into()),
+                    ));
                 }
-                _ => env_deps.push((unescape_dep_env(env_dep).into(), "".into())),
+                _ => env_deps.push((unescape_dep_env(env_dep).into(), None)),
             }
         }
     }
@@ -2207,6 +2217,12 @@ where
         let verbatim = basedirs_verbatim_env_deps(&env_vars, basedirs);
         for (var, val) in env_deps.iter() {
             var.hash(&mut HashToDigest { digest: &mut m });
+            let Some(val) = val else {
+                // `option_env!` yields `None` for an unset variable and `Some("")` for an
+                // empty one, so the two must not share a key.
+                m.update(b"\0");
+                continue;
+            };
             m.update(b"=");
             if verbatim(var) {
                 val.hash(&mut HashToDigest { digest: &mut m });
@@ -3978,9 +3994,9 @@ bar.rs:
         assert_eq!(
             parse_env_dep_info(deps),
             [
-                ("OUT_DIR".into(), r"C:\dir\out".into()),
-                ("X".into(), "a\nb\rc=d".into()),
-                ("Y".into(), "".into()),
+                ("OUT_DIR".into(), Some(r"C:\dir\out".into())),
+                ("X".into(), Some("a\nb\rc=d".into())),
+                ("Y".into(), None),
             ]
         );
     }
@@ -4345,7 +4361,7 @@ hash 42fac6f0 stable_crate_id StableCrateId(12206970385906972588)
     fn mock_dep_info_with_env(
         creator: &Arc<Mutex<MockCommandCreator>>,
         dep_srcs: &[&str],
-        env_deps: &[(&str, OsString)],
+        env_deps: &[(&str, Option<OsString>)],
     ) {
         // Mock the `rustc --emit=dep-info` process by writing
         // a dep-info file.
@@ -4354,9 +4370,13 @@ hash 42fac6f0 stable_crate_id StableCrateId(12206970385906972588)
             .map(|s| (*s).to_string())
             .collect::<Vec<String>>();
         sorted_deps.sort();
+        // rustc writes `NAME` for a variable that was unset and `NAME=` for an empty one.
         let env_deps = env_deps
             .iter()
-            .map(|(var, val)| format!("# env-dep:{var}={}", escape_dep_env(val)))
+            .map(|(var, val)| match val {
+                Some(val) => format!("# env-dep:{var}={}", escape_dep_env(val)),
+                None => format!("# env-dep:{var}"),
+            })
             .collect::<Vec<String>>();
         next_command_calls(creator, move |args| {
             // A long command line comes as a response file, see `arguments_for_spawn`.
@@ -4727,7 +4747,7 @@ foo.rs:
         f: &TestFixture,
         args: &[A],
         env_vars: &[(OsString, OsString)],
-        env_deps: &[(&str, OsString)],
+        env_deps: &[(&str, Option<OsString>)],
         pre_func: F,
         storage: MockStorage,
     ) -> String
@@ -4742,7 +4762,7 @@ foo.rs:
         f: &TestFixture,
         args: &[A],
         env_vars: &[(OsString, OsString)],
-        env_deps: &[(&str, OsString)],
+        env_deps: &[(&str, Option<OsString>)],
         pre_func: F,
         storage: MockStorage,
     ) -> HashResult<Arc<Mutex<MockCommandCreator>>>
@@ -4847,7 +4867,7 @@ foo.rs:
                     ("CARGO_MANIFEST_DIR".into(), root.into()),
                     ("CARGO_OUTSIDE".into(), outside.into()),
                 ],
-                &[("OUT_DIR", root.join("target").join("out").into())],
+                &[("OUT_DIR", Some(root.join("target").join("out").into()))],
                 nothing,
                 MockStorage::new(None, false).with_basedirs(basedirs),
             )
@@ -4865,10 +4885,12 @@ foo.rs:
         assert_eq!(key(&a, "x", vec![]), key(&a, "x", vec![elsewhere]));
     }
 
-    /// An env-dep equal to a basedir is keyed apart from an unset one, which rustc
-    /// writes as `# env-dep:Y` for an `option_env!("Y")`.
+    /// `option_env!("Y")` is `None` when `Y` is unset and `Some("")` when it is empty,
+    /// which rustc writes as `# env-dep:Y` and `# env-dep:Y=`. A crate that read it in
+    /// one state must not be served the output of another, whether that is an empty
+    /// value, some other value or one equal to a basedir.
     #[test]
-    fn test_hash_env_dep_equal_to_basedir_is_not_unset() {
+    fn test_hash_unset_env_dep_is_keyed_apart() {
         let f = TestFixture::new();
         let root = f.tempdir.path().to_owned();
         // rustc reads `Y` from the environment, so a set `Y` is there too. Without
@@ -4890,12 +4912,20 @@ foo.rs:
                     "lib",
                 ],
                 &env_vars,
-                &[("Y", val.unwrap_or_default())],
+                &[("Y", val)],
                 nothing,
                 MockStorage::new(None, false).with_basedirs(vec![basedir(&root)]),
             )
         };
-        assert_ne!(key(None), key(Some(root.clone().into())));
+        let unset = key(None);
+        let empty = key(Some("".into()));
+        assert_ne!(unset, empty);
+        assert_ne!(unset, key(Some("x".into())));
+        assert_ne!(unset, key(Some(root.clone().into())));
+        assert_ne!(empty, key(Some("x".into())));
+        // The same state keeps its key.
+        assert_eq!(unset, key(None));
+        assert_eq!(empty, key(Some("".into())));
     }
 
     /// SCCACHE_BASEDIRS_VERBATIM_ENV_DEPS keeps a crate that read a listed env-dep keyed
@@ -4916,8 +4946,8 @@ foo.rs:
                 ("READS".into(), reads.unwrap_or_default().into()),
             ];
             env_vars.extend(verbatim.map(|(var, v)| (var.into(), v.into())));
-            let mut env_deps = vec![("OUT_DIR", root.join("target").join("out").into())];
-            env_deps.extend(reads.map(|name| (name, root.into())));
+            let mut env_deps = vec![("OUT_DIR", Some(root.join("target").join("out").into()))];
+            env_deps.extend(reads.map(|name| (name, Some(root.into()))));
             hash_key_with(
                 f,
                 &[
